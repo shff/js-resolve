@@ -1,34 +1,35 @@
 use std::fs::read_to_string;
+use std::io::{Error, ErrorKind};
 use std::path::{Component, Path, PathBuf};
 
-pub fn resolve(name: String, context: &Path) -> Option<PathBuf> {
+pub fn resolve(name: String, context: &Path) -> Result<PathBuf, Error> {
+    let parent = context.parent().unwrap();
     let path = Path::new(&name);
     if path.starts_with("./") || path.starts_with("../") {
-        let new_path = normalize(&context.join(path));
+        let new_path = normalize(&parent.join(path));
 
         load(&new_path)
     } else if path.is_absolute() {
         load(path)
     } else if name.is_empty() {
-        load(context)
+        load(parent)
     } else {
-        let parent = context.parent()?;
-        let new_path = context.join("node_modules").join(&path);
+        let new_path = parent.join("node_modules").join(&path);
 
-        load(&new_path).or(resolve(name, parent))
+        load(&new_path).or_else(|_| resolve(name, parent))
     }
 }
 
-fn load(path: &Path) -> Option<PathBuf> {
+fn load(path: &Path) -> Result<PathBuf, Error> {
     if path.is_file() {
-        return Some(path.to_path_buf());
+        return Ok(path.to_path_buf());
     }
 
     let extensions = vec!["js", "mjs", "json"];
     for extension in extensions {
         let new_path = path.with_extension(extension);
         if new_path.is_file() {
-            return Some(new_path);
+            return Ok(new_path);
         }
     }
 
@@ -45,16 +46,21 @@ fn load(path: &Path) -> Option<PathBuf> {
     if path.is_dir() {
         return load(&path.join("index"));
     }
-    None
+    Err(Error::new(
+        ErrorKind::NotFound,
+        format!("Can't find {}", path.display()),
+    ))
 }
 
-fn normalize(p: &Path) -> PathBuf {
-    p.components().fold(PathBuf::from("/"), |path, c| match c {
+pub fn normalize(p: &Path) -> PathBuf {
+    p.components().fold(PathBuf::from(""), |path, c| match c {
         Component::Prefix(ref prefix) => PathBuf::from(prefix.as_os_str().to_owned()),
-        Component::RootDir => path.join("/"),
-        Component::CurDir => path,
-        Component::ParentDir => path.parent().unwrap().to_owned(),
+        Component::RootDir | Component::CurDir => path.join("/"),
         Component::Normal(part) => path.join(part),
+        Component::ParentDir => match path.parent() {
+            Some(path) => path.to_owned(),
+            None => path,
+        },
     })
 }
 
@@ -62,9 +68,10 @@ fn normalize(p: &Path) -> PathBuf {
 fn test_resolve() {
     fn assert_resolves(name: &str, path: &str, expected: &str) {
         let fixtures = std::env::current_dir().unwrap().join("fixtures");
-        assert_eq!(resolve(name.to_string(), &fixtures.join(path)), Some(
-            normalize(&fixtures.join(path).join(expected.to_string()))
-        ));
+        assert_eq!(
+            resolve(name.to_string(), &fixtures.join(path).join("index.js")).unwrap(),
+            normalize(&fixtures.join(path).join(expected.to_string())),
+        );
     }
 
     assert_resolves("", "no-entry", "index.js");
